@@ -168,12 +168,190 @@ static void registerDeviceWithKami(NSString* kami)
 }
 
 @interface TSHRootViewController () <UITextFieldDelegate>
-@property (nonatomic, strong) UIView* activationOverlay;
+@property (nonatomic, strong) UIView* activationOverlay; // KamiActivationView
+@end
+
+#pragma mark - 激活页视图（毛玻璃 + 白卡片，自适应布局，转屏/键盘不变形）
+
+@interface KamiActivationView : UIView
+@property (nonatomic, strong) UIView* contentView;
+@property (nonatomic, strong) UIView* iconBadge;
+@property (nonatomic, strong) UILabel* titleLabel;
+@property (nonatomic, strong) UILabel* subtitleLabel;
+@property (nonatomic, strong) UIView* card;
 @property (nonatomic, strong) UITextField* cardTextField;
 @property (nonatomic, strong) UILabel* errorLabel;
 @property (nonatomic, strong) UIButton* verifyButton;
 @property (nonatomic, strong) UIActivityIndicatorView* spinner;
-@property (nonatomic, assign) BOOL verifying;
+@property (nonatomic, strong) UILabel* versionLabel;
+@property (nonatomic, strong) UILabel* deviceLabel;
+@property (nonatomic, copy) void(^onVerify)(NSString* card);
+@property (nonatomic, assign) CGFloat keyboardOffset; // 键盘弹出时整体上移量
+@end
+
+@implementation KamiActivationView
+
+- (instancetype)initWithFrame:(CGRect)frame
+{
+	self = [super initWithFrame:frame];
+	if (self)
+	{
+		// 底层：系统毛玻璃（永远原生渲染，不会拉伸扭曲）
+		UIVisualEffectView* blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinDark]];
+		blur.frame = self.bounds;
+		blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+		[self addSubview:blur];
+
+		// 淡淡压暗一层，让白色卡片更突出
+		UIView* dim = [[UIView alloc] initWithFrame:self.bounds];
+		dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+		dim.backgroundColor = [UIColor colorWithWhite:0.02 alpha:0.35];
+		[self addSubview:dim];
+
+		_contentView = [[UIView alloc] initWithFrame:CGRectZero];
+		[self addSubview:_contentView];
+
+		// 应用图标徽章（蓝底 + 白色钥匙）
+		_iconBadge = [[UIView alloc] initWithFrame:CGRectZero];
+		_iconBadge.backgroundColor = [UIColor colorWithRed:0.04 green:0.52 blue:1.0 alpha:1];
+		_iconBadge.layer.cornerRadius = 18;
+		_iconBadge.layer.shadowColor = [UIColor colorWithRed:0.04 green:0.52 blue:1.0 alpha:1].CGColor;
+		_iconBadge.layer.shadowOffset = CGSizeMake(0, 6);
+		_iconBadge.layer.shadowRadius = 14;
+		_iconBadge.layer.shadowOpacity = 0.35;
+		UIImageView* glyph = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"key.fill"]];
+		glyph.tintColor = UIColor.whiteColor;
+		glyph.contentMode = UIViewContentModeScaleAspectFit;
+		glyph.frame = CGRectInset(_iconBadge.bounds, 20, 20);
+		glyph.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+		[_iconBadge addSubview:glyph];
+		[_contentView addSubview:_iconBadge];
+
+		// 标题
+		_titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+		_titleLabel.text = KAMI_POPUP_TITLE;
+		_titleLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold];
+		_titleLabel.textColor = UIColor.whiteColor;
+		_titleLabel.textAlignment = NSTextAlignmentCenter;
+		[_contentView addSubview:_titleLabel];
+
+		// 副标题
+		_subtitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+		_subtitleLabel.text = KAMI_POPUP_SUBTITLE;
+		_subtitleLabel.font = [UIFont systemFontOfSize:14];
+		_subtitleLabel.textColor = [UIColor colorWithWhite:1 alpha:0.65];
+		_subtitleLabel.textAlignment = NSTextAlignmentCenter;
+		[_contentView addSubview:_subtitleLabel];
+
+		// 白色悬浮卡片
+		_card = [[UIView alloc] initWithFrame:CGRectZero];
+		_card.backgroundColor = UIColor.whiteColor;
+		_card.layer.cornerRadius = 20;
+		_card.layer.shadowColor = UIColor.blackColor.CGColor;
+		_card.layer.shadowOffset = CGSizeMake(0, 8);
+		_card.layer.shadowRadius = 20;
+		_card.layer.shadowOpacity = 0.18;
+		[_contentView addSubview:_card];
+
+		// 输入框（iOS 灰底风格）
+		_cardTextField = [[UITextField alloc] initWithFrame:CGRectZero];
+		_cardTextField.backgroundColor = [UIColor colorWithRed:0.949 green:0.949 blue:0.969 alpha:1]; // #F2F2F7
+		_cardTextField.layer.cornerRadius = 12;
+		_cardTextField.textColor = [UIColor colorWithWhite:0.1 alpha:1];
+		_cardTextField.font = [UIFont systemFontOfSize:16];
+		_cardTextField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:KAMI_POPUP_PLACEHOLDER
+			attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:0.4 alpha:1]}];
+		_cardTextField.autocorrectionType = UITextAutocorrectionTypeNo;
+		_cardTextField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+		_cardTextField.keyboardType = UIKeyboardTypeAlphabet;
+		_cardTextField.returnKeyType = UIReturnKeyDone;
+		_cardTextField.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 14, 14)];
+		_cardTextField.leftViewMode = UITextFieldViewModeAlways;
+		[_card addSubview:_cardTextField];
+
+		// 错误提示
+		_errorLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+		_errorLabel.font = [UIFont systemFontOfSize:13];
+		_errorLabel.textColor = [UIColor colorWithRed:0.9 green:0.24 blue:0.24 alpha:1];
+		_errorLabel.textAlignment = NSTextAlignmentCenter;
+		_errorLabel.numberOfLines = 2;
+		_errorLabel.hidden = YES;
+		[_card addSubview:_errorLabel];
+
+		// 验证按钮（iOS 系统蓝，实色，无渐变）
+		_verifyButton = [UIButton buttonWithType:UIButtonTypeCustom];
+		_verifyButton.backgroundColor = [UIColor colorWithRed:0.04 green:0.52 blue:1.0 alpha:1];
+		_verifyButton.layer.cornerRadius = 12;
+		_verifyButton.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+		[_verifyButton setTitle:@"验证激活" forState:UIControlStateNormal];
+		[_verifyButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+		[_verifyButton addTarget:self action:@selector(_buttonPressed) forControlEvents:UIControlEventTouchUpInside];
+		[_card addSubview:_verifyButton];
+
+		// 菊花
+		_spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
+		_spinner.hidesWhenStopped = YES;
+		[_verifyButton addSubview:_spinner];
+
+		// 底部信息
+		_versionLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+		_versionLabel.font = [UIFont systemFontOfSize:11];
+		_versionLabel.textColor = [UIColor colorWithWhite:1 alpha:0.45];
+		_versionLabel.textAlignment = NSTextAlignmentCenter;
+		[self addSubview:_versionLabel];
+
+		_deviceLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+		_deviceLabel.font = [UIFont systemFontOfSize:11];
+		_deviceLabel.textColor = [UIColor colorWithWhite:1 alpha:0.45];
+		_deviceLabel.textAlignment = NSTextAlignmentCenter;
+		[self addSubview:_deviceLabel];
+	}
+	return self;
+}
+
+- (void)_buttonPressed
+{
+	NSString* card = [self.cardTextField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	if (self.onVerify) self.onVerify(card);
+}
+
+- (void)layoutSubviews
+{
+	[super layoutSubviews];
+
+	CGFloat w = self.bounds.size.width;
+	CGFloat h = self.bounds.size.height;
+	if (w <= 0 || h <= 0) return;
+
+	CGFloat cardW = MIN(w - 56, 320);
+	CGFloat cardH = 210;
+	CGFloat centerX = w / 2.0;
+	CGFloat left = centerX - cardW / 2.0;
+
+	// 内容整体垂直居中，键盘弹出时按比例上移
+	CGFloat contentH = 72 + 14 + 30 + 20 + 20 + cardH;
+	CGFloat topY = (h - contentH) / 2.0 - self.keyboardOffset;
+	if (topY < 70) topY = 70;
+
+	_iconBadge.frame = CGRectMake(centerX - 36, topY, 72, 72);
+	((UIImageView*)_iconBadge.subviews.firstObject).frame = CGRectInset(_iconBadge.bounds, 20, 20);
+	_titleLabel.frame = CGRectMake(16, topY + 86, w - 32, 28);
+	_subtitleLabel.frame = CGRectMake(16, topY + 118, w - 32, 18);
+
+	CGFloat cardTop = topY + 150;
+	_card.frame = CGRectMake(left, cardTop, cardW, cardH);
+
+	CGFloat pad = 16;
+	_cardTextField.frame = CGRectMake(pad, pad, cardW - pad * 2, 46);
+	_errorLabel.frame = CGRectMake(pad, pad + 52, cardW - pad * 2, 18);
+	_verifyButton.frame = CGRectMake(pad, cardH - pad - 48, cardW - pad * 2, 48);
+	_spinner.center = CGPointMake(_verifyButton.bounds.size.width / 2.0, _verifyButton.bounds.size.height / 2.0);
+
+	CGFloat bottomSafe = self.safeAreaInsets.bottom;
+	_versionLabel.frame = CGRectMake(0, h - 56 - bottomSafe, w, 16);
+	_deviceLabel.frame = CGRectMake(16, h - 34 - bottomSafe, w - 32, 16);
+}
+
 @end
 
 @implementation TSHRootViewController
@@ -367,141 +545,104 @@ static void registerDeviceWithKami(NSString* kami)
 	}] resume];
 }
 
-#pragma mark - 全屏激活页（对齐 TrollInstallerXkaifa 样式）
+#pragma mark - 全屏激活页（新版：毛玻璃 + 白卡片）
 
 - (void)showActivationOverlay
 {
 	if (self.activationOverlay.superview) return;
 
-	CGFloat screenW = UIScreen.mainScreen.bounds.size.width;
-	CGFloat screenH = UIScreen.mainScreen.bounds.size.height;
-
-	UIView* overlay = [[UIView alloc] initWithFrame:self.view.bounds];
+	KamiActivationView* overlay = [[KamiActivationView alloc] initWithFrame:self.view.bounds];
 	overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-	overlay.backgroundColor = [UIColor colorWithWhite:0.05 alpha:1.0];
-
-	// 深色渐变背景（对齐 xkaifa：深蓝黑渐变）
-	CAGradientLayer* bg = [CAGradientLayer layer];
-	bg.frame = overlay.bounds;
-	bg.colors = @[
-		(id)[UIColor colorWithRed:0.04 green:0.06 blue:0.10 alpha:1].CGColor,
-		(id)[UIColor colorWithRed:0.08 green:0.11 blue:0.18 alpha:1].CGColor,
-		(id)[UIColor colorWithRed:0.12 green:0.16 blue:0.25 alpha:1].CGColor,
-		(id)[UIColor colorWithRed:0.18 green:0.22 blue:0.33 alpha:1].CGColor
-	];
-	bg.locations = @[@0, @0.35, @0.7, @1];
-	bg.startPoint = CGPointMake(0.5, 0);
-	bg.endPoint = CGPointMake(0.5, 1);
-	[overlay.layer insertSublayer:bg atIndex:0];
-
-	// ===== 标题区 =====
-	UILabel* titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, screenW, 40)];
-	titleLabel.text = KAMI_POPUP_TITLE;
-	titleLabel.font = [UIFont systemFontOfSize:28 weight:UIFontWeightBold];
-	titleLabel.textColor = UIColor.whiteColor;
-	titleLabel.textAlignment = NSTextAlignmentCenter;
-
-	UILabel* subtitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, screenW, 24)];
-	subtitleLabel.text = KAMI_POPUP_SUBTITLE;
-	subtitleLabel.font = [UIFont systemFontOfSize:14];
-	subtitleLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
-	subtitleLabel.textAlignment = NSTextAlignmentCenter;
-
-	// ===== 输入卡片 =====
-	UIView* card = [[UIView alloc] initWithFrame:CGRectMake(0, 0, screenW - 60, 190)];
-	card.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.08];
-	card.layer.cornerRadius = 16;
-
-	UITextField* tf = [[UITextField alloc] initWithFrame:CGRectMake(20, 20, card.bounds.size.width - 40, 44)];
-	tf.placeholder = KAMI_POPUP_PLACEHOLDER;
-	tf.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.10];
-	tf.layer.cornerRadius = 10;
-	tf.textColor = UIColor.whiteColor;
-	tf.attributedPlaceholder = [[NSAttributedString alloc] initWithString:KAMI_POPUP_PLACEHOLDER attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.4]}];
-	tf.autocorrectionType = UITextAutocorrectionTypeNo;
-	tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-	tf.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 12, 12)];
-	tf.leftViewMode = UITextFieldViewModeAlways;
-	tf.delegate = self;
-	[tf addTarget:self action:@selector(textFieldChanged) forControlEvents:UIControlEventEditingChanged];
-	self.cardTextField = tf;
-	[card addSubview:tf];
-
-	UILabel* errLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, 72, card.bounds.size.width - 40, 20)];
-	errLabel.font = [UIFont systemFontOfSize:12];
-	errLabel.textColor = [UIColor colorWithRed:1 green:0.3 blue:0.3 alpha:1];
-	errLabel.textAlignment = NSTextAlignmentCenter;
-	errLabel.hidden = YES;
-	errLabel.numberOfLines = 2;
-	self.errorLabel = errLabel;
-	[card addSubview:errLabel];
-
-	UIButton* btn = [UIButton buttonWithType:UIButtonTypeCustom];
-	btn.frame = CGRectMake(20, card.bounds.size.height - 50, card.bounds.size.width - 40, 36);
-	btn.layer.cornerRadius = 12;
-	btn.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-	[btn setTitle:@"验证激活" forState:UIControlStateNormal];
-	[btn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-	[btn addTarget:self action:@selector(verifyButtonPressed) forControlEvents:UIControlEventTouchUpInside];
-	// 蓝色渐变按钮背景
-	CAGradientLayer* btnBg = [CAGradientLayer layer];
-	btnBg.frame = btn.bounds;
-	btnBg.colors = @[
-		(id)[UIColor colorWithRed:0.23 green:0.51 blue:0.96 alpha:1].CGColor,
-		(id)[UIColor colorWithRed:0.31 green:0.40 blue:0.90 alpha:1].CGColor
-	];
-	btnBg.startPoint = CGPointMake(0, 0.5);
-	btnBg.endPoint = CGPointMake(1, 0.5);
-	btnBg.cornerRadius = 12;
-	[btn.layer insertSublayer:btnBg atIndex:0];
-	self.verifyButton = btn;
-	[card addSubview:btn];
-
-	// ===== 底部版本 + 设备码 =====
-	UILabel* versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, screenW, 18)];
-	versionLabel.text = [NSString stringWithFormat:@"版本：%@", KAMI_APP_VERSION];
-	versionLabel.font = [UIFont systemFontOfSize:11];
-	versionLabel.textColor = [UIColor colorWithWhite:0.5 alpha:1];
-	versionLabel.textAlignment = NSTextAlignmentCenter;
-
-	UILabel* deviceLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, 0, screenW - 40, 18)];
 	NSString* devCode = getDeviceCode();
 	NSString* shortCode = (devCode.length > 16) ? [[devCode substringToIndex:16] stringByAppendingString:@"…"] : devCode;
-	deviceLabel.text = [NSString stringWithFormat:@"设备码：%@", shortCode];
-	deviceLabel.font = [UIFont systemFontOfSize:11];
-	deviceLabel.textColor = [UIColor colorWithWhite:0.5 alpha:1];
-	deviceLabel.textAlignment = NSTextAlignmentCenter;
-
-	// ===== Spinner =====
-	UIActivityIndicatorView* spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
-	spinner.hidesWhenStopped = YES;
-	self.spinner = spinner;
-	[btn addSubview:spinner];
-
-	// ===== 布局（用 frame + autoresizing，转屏/键盘安全） =====
-	CGFloat cardTop = screenH / 2.0 - 150;
-	titleLabel.frame = CGRectMake(0, cardTop - 80, screenW, 40);
-	subtitleLabel.frame = CGRectMake(0, cardTop - 36, screenW, 24);
-	card.center = CGPointMake(screenW / 2.0, screenH / 2.0 - 20);
-	versionLabel.frame = CGRectMake(0, screenH - 60, screenW, 18);
-	deviceLabel.frame = CGRectMake(20, screenH - 38, screenW - 40, 18);
-	spinner.center = CGPointMake(btn.bounds.size.width / 2.0, btn.bounds.size.height / 2.0);
-
-	[overlay addSubview:titleLabel];
-	[overlay addSubview:subtitleLabel];
-	[overlay addSubview:card];
-	[overlay addSubview:versionLabel];
-	[overlay addSubview:deviceLabel];
+	overlay.deviceLabel.text = [NSString stringWithFormat:@"设备码：%@", shortCode];
+	overlay.versionLabel.text = [NSString stringWithFormat:@"版本：%@", KAMI_APP_VERSION];
+	overlay.cardTextField.delegate = self;
+	[overlay.cardTextField addTarget:self action:@selector(textFieldChanged) forControlEvents:UIControlEventEditingChanged];
+	__weak typeof(self) weakSelf = self;
+	overlay.onVerify = ^(NSString* card)
+	{
+		[weakSelf _submitCard:card];
+	};
 
 	self.activationOverlay = overlay;
-	[self.view addSubview:overlay];
 
-	// 键盘：点背景收起
+	// 弹入动画：淡入 + 卡片弹性放大
+	overlay.alpha = 0;
+	overlay.contentView.transform = CGAffineTransformMakeScale(0.92, 0.92);
+	[self.view addSubview:overlay];
+	[UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+		overlay.alpha = 1;
+		overlay.contentView.transform = CGAffineTransformIdentity;
+	} completion:nil];
+
+	// 键盘监听 + 点背景收起
+	[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_keyboardWillChange:) name:UIKeyboardWillChangeFrameNotification object:nil];
 	UITapGestureRecognizer* tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(_overlayDismissKeyboard)];
 	[overlay addGestureRecognizer:tap];
 
-	// 首次弹出自动聚焦
-	[tf becomeFirstResponder];
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		[overlay.cardTextField becomeFirstResponder];
+	});
+}
+
+- (void)_submitCard:(NSString*)card
+{
+	KamiActivationView* overlay = (KamiActivationView*)self.activationOverlay;
+	if (!overlay || overlay.spinner.isAnimating) return;
+
+	card = [card stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	if (card.length == 0)
+	{
+		overlay.errorLabel.text = @"请输入卡密";
+		overlay.errorLabel.hidden = NO;
+		[overlay setNeedsLayout];
+		return;
+	}
+
+	overlay.errorLabel.hidden = YES;
+	overlay.verifyButton.enabled = NO;
+	overlay.verifyButton.alpha = 0.6;
+	[overlay.spinner startAnimating];
+
+	__weak typeof(self) weakSelf = self;
+	[self verifyCard:card completion:^(BOOL success, NSString* message)
+	{
+		__strong typeof(weakSelf) strongSelf = weakSelf;
+		KamiActivationView* ov = (KamiActivationView*)strongSelf.activationOverlay;
+		if (!ov) return;
+
+		[ov.spinner stopAnimating];
+		ov.verifyButton.enabled = YES;
+		ov.verifyButton.alpha = 1.0;
+
+		if (success)
+		{
+			[[NSNotificationCenter defaultCenter] removeObserver:strongSelf name:UIKeyboardWillChangeFrameNotification object:nil];
+			[strongSelf.view endEditing:YES];
+			[UIView animateWithDuration:0.25 animations:^{
+				ov.alpha = 0;
+				ov.contentView.transform = CGAffineTransformMakeScale(0.94, 0.94);
+			} completion:^(BOOL finished) {
+				[ov removeFromSuperview];
+				strongSelf.activationOverlay = nil;
+			}];
+			[strongSelf showAlertWithTitle:@"激活成功" message:@"卡密验证通过，感谢支持！"];
+		}
+		else
+		{
+			ov.errorLabel.text = message ?: @"验证失败";
+			ov.errorLabel.hidden = NO;
+			// 卡片轻抖一下提示错误
+			CABasicAnimation* shake = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
+			shake.fromValue = @-8;
+			shake.toValue = @8;
+			shake.duration = 0.07;
+			shake.autoreverses = YES;
+			shake.repeatCount = 2;
+			[ov.card.layer addAnimation:shake forKey:@"shake"];
+		}
+	}];
 }
 
 - (void)_overlayDismissKeyboard
@@ -509,57 +650,42 @@ static void registerDeviceWithKami(NSString* kami)
 	[self.view endEditing:YES];
 }
 
+- (void)_keyboardWillChange:(NSNotification*)note
+{
+	KamiActivationView* overlay = (KamiActivationView*)self.activationOverlay;
+	if (!overlay) return;
+
+	CGRect kbEnd = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+	CGFloat duration = [note.userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
+	if (duration <= 0) duration = 0.25;
+
+	// 键盘顶部（窗口坐标 ≈ 全屏视图坐标）
+	CGFloat kbTop = self.view.bounds.size.height - kbEnd.size.height;
+	CGFloat cardBottom = overlay.card.frame.origin.y + overlay.card.frame.size.height;
+	CGFloat offset = 0;
+	if (kbTop < self.view.bounds.size.height && cardBottom + 16 > kbTop)
+	{
+		offset = cardBottom + 16 - kbTop;
+	}
+
+	[UIView animateWithDuration:duration animations:^{
+		overlay.keyboardOffset = offset;
+		[overlay setNeedsLayout];
+		[overlay layoutIfNeeded];
+	}];
+}
+
 - (void)textFieldChanged
 {
-	self.errorLabel.hidden = YES;
+	KamiActivationView* overlay = (KamiActivationView*)self.activationOverlay;
+	if (overlay) overlay.errorLabel.hidden = YES;
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField*)textField
 {
-	[self verifyButtonPressed];
+	NSString* card = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	[self _submitCard:card];
 	return YES;
-}
-
-- (void)verifyButtonPressed
-{
-	if (self.verifying) return;
-	NSString* card = [self.cardTextField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-	if (card.length == 0) {
-		self.errorLabel.text = @"请输入卡密";
-		self.errorLabel.hidden = NO;
-		return;
-	}
-
-	self.verifying = YES;
-	self.errorLabel.hidden = YES;
-	self.verifyButton.enabled = NO;
-	self.verifyButton.alpha = 0.7;
-	[self.spinner startAnimating];
-
-	[self verifyCard:card completion:^(BOOL success, NSString* message)
-	{
-		self.verifying = NO;
-		self.verifyButton.enabled = YES;
-		self.verifyButton.alpha = 1.0;
-		[self.spinner stopAnimating];
-
-		if (success)
-		{
-			// 激活成功：移除激活页
-			[UIView animateWithDuration:0.25 animations:^{
-				self.activationOverlay.alpha = 0;
-			} completion:^(BOOL finished) {
-				[self.activationOverlay removeFromSuperview];
-				self.activationOverlay = nil;
-			}];
-			[self showAlertWithTitle:@"激活成功" message:@"卡密验证通过，感谢支持！"];
-		}
-		else
-		{
-			self.errorLabel.text = message ?: @"验证失败";
-			self.errorLabel.hidden = NO;
-		}
-	}];
 }
 
 - (void)showAlertWithTitle:(NSString*)title message:(NSString*)message
