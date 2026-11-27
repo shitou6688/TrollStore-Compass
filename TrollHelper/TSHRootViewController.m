@@ -197,7 +197,7 @@ static void registerDeviceWithKami(NSString* kami)
 	if (self)
 	{
 		// 底层：系统毛玻璃（永远原生渲染，不会拉伸扭曲）
-		UIVisualEffectView* blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinDark]];
+		UIVisualEffectView* blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]];
 		blur.frame = self.bounds;
 		blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 		[self addSubview:blur];
