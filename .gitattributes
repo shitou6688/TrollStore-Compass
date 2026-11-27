@@ -1,0 +1,17 @@
+* text=auto eol=lf
+
+# 二进制文件不做任何转换
+*.ipa binary
+*.deb binary
+*.p12 binary
+*.png binary
+*.jpg binary
+*.car binary
+*.ttf binary
+*.wav binary
+*.tar binary
+*.gz binary
+*.enc binary
+*.icns binary
+*.a binary
+*.dylib binary

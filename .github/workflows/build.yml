@@ -1,0 +1,217 @@
+name: Build TrollStore Compass
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      download_url:
+        description: 'TrollStore.tar 下载地址（助手内"安装巨魔商店"按钮用）'
+        required: false
+        default: 'https://www.modelscope.cn/datasets/qwer1234561476/jumo/resolve/master/8.enc'
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Cache Theos
+        uses: actions/cache@v4
+        with:
+          path: ~/theos
+          key: theos-compass-v1-${{ hashFiles('.github/workflows/build.yml') }}
+
+      - name: Cache fastPathSign
+        uses: actions/cache@v4
+        with:
+          path: ./Exploits/fastPathSign/fastPathSign
+          key: fps-compass-v1-${{ hashFiles('Exploits/fastPathSign/Makefile', 'ChOma/Makefile') }}
+
+      - name: Install dependencies
+        run: |
+          brew install openssl@3 libarchive pkg-config ldid || true
+
+      - name: Setup Theos + SDK
+        run: |
+          export THEOS=~/theos
+          if [ ! -d "$THEOS/bin" ]; then
+            git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          fi
+          mkdir -p "$THEOS/sdks"
+          curl -sL "https://github.com/theos/sdks/archive/master.zip" -o /tmp/sdks.zip
+          unzip -qo /tmp/sdks.zip -d /tmp
+          cp -R /tmp/sdks-master/iPhoneOS16.5.sdk "$THEOS/sdks/" 2>/dev/null || cp -R /tmp/sdks-master/*.sdk "$THEOS/sdks/" 2>/dev/null || true
+          rm -rf /tmp/sdks-master /tmp/sdks.zip
+          if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
+            SDK=$(ls -d "$THEOS/sdks/"*.sdk 2>/dev/null | head -1)
+            [ -n "$SDK" ] && ln -sfn "$SDK" "$THEOS/sdks/iPhoneOS16.5.sdk"
+          fi
+          XCODE_SDK=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
+          [ -n "$XCODE_SDK" ] && ln -sfn "$XCODE_SDK" "$THEOS/sdks/iPhoneOS17.5.sdk" 2>/dev/null || true
+          echo "=== SDK 列表 ==="
+          ls "$THEOS/sdks/" 2>/dev/null
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "PATH=$THEOS/bin:$PATH" >> $GITHUB_ENV
+
+      # ========== 编译 fastPathSign（CoreTrust 签名工具） ==========
+      - name: Build fastPathSign
+        run: |
+          if [ ! -f "./Exploits/fastPathSign/fastPathSign" ]; then
+            make -C Exploits/fastPathSign
+          fi
+
+      # ========== 补丁：安装巨魔的下载地址 ==========
+      - name: Patch download URL
+        run: |
+          OLD_URL=$(grep -o 'https://www.modelscope.cn/datasets/qwer1234561476/jumo/resolve/master/[a-zA-Z0-9._]*' Shared/TSListControllerShared.m | head -1)
+          echo "原地址: $OLD_URL → 新地址: ${{ github.event.inputs.download_url }}"
+          sed -i '' "s|$OLD_URL|${{ github.event.inputs.download_url }}|g" Shared/TSListControllerShared.m
+          grep -n "modelscope" Shared/TSListControllerShared.m
+
+      # ========== 编译 RootHelper（trollstorehelper） ==========
+      - name: Build RootHelper
+        run: make -C RootHelper DEBUG=0
+
+      # ========== 编译 TrollStore.app ==========
+      - name: Build TrollStore.app
+        run: make -C TrollStore FINALPACKAGE=1
+
+      # ========== 编译持久化助手三种变体 ==========
+      - name: Build PersistenceHelper (3 variants)
+        run: |
+          mkdir -p _build
+          # 1) Embedded：打包进 TrollStore.tar
+          make -C TrollHelper clean
+          make -C TrollHelper FINALPACKAGE=1 EMBEDDED_ROOT_HELPER=1
+          cp TrollHelper/.theos/obj/TrollStorePersistenceHelper.app/TrollStorePersistenceHelper _build/PersistenceHelper_Embedded
+          # 2) Legacy arm64：用于 TrollHelper_iOS15.ipa（legacy CoreTrust 证书签名，iOS15 设备）
+          make -C TrollHelper clean
+          make -C TrollHelper FINALPACKAGE=1 EMBEDDED_ROOT_HELPER=1 LEGACY_CT_BUG=1
+          cp TrollHelper/.theos/obj/TrollStorePersistenceHelper.app/TrollStorePersistenceHelper _build/PersistenceHelper_Legacy_arm64
+          # 3) Legacy arm64e：用于 TrollHelper_arm64e.ipa（A12-A11 设备）
+          make -C TrollHelper clean
+          make -C TrollHelper FINALPACKAGE=1 EMBEDDED_ROOT_HELPER=1 CUSTOM_ARCHS=arm64e
+          cp TrollHelper/.theos/obj/TrollStorePersistenceHelper.app/TrollStorePersistenceHelper _build/PersistenceHelper_Legacy_arm64e
+          make -C TrollHelper clean
+
+      # ========== 组装 TrollStore.tar（与 shitou6688/TrollStore build-full 一致） ==========
+      - name: Assemble TrollStore.tar
+        run: |
+          cp RootHelper/.theos/obj/trollstorehelper TrollStore/.theos/obj/TrollStore.app/trollstorehelper
+          cp _build/PersistenceHelper_Embedded TrollStore/.theos/obj/TrollStore.app/PersistenceHelper
+          export COPYFILE_DISABLE=1
+          tar -czvf _build/TrollStore.tar -C TrollStore/.theos/obj TrollStore.app
+          echo "=== 验证 tar 内容 ==="
+          tar -tzvf _build/TrollStore.tar | head -20
+          echo "=== 验证卡密字符串 ==="
+          strings TrollStore/.theos/obj/TrollStore.app/trollstorehelper | grep -c "kmlogon\|aa.jm2.top" || true
+          strings _build/PersistenceHelper_Embedded | grep -c "kmlogon\|aa.jm2.top\|10003" || true
+
+      # ========== 编译 Pwnify（二进制注入工具） ==========
+      - name: Build Pwnify
+        run: make -C Pwnify
+
+      # ========== 从指南针壳提取 TeamID 并生成配套受害者证书 ==========
+      - name: Generate victim certificate
+        run: |
+          cd Victim
+          chmod +x make_cert.sh
+          mkdir -p /tmp/ipa_check
+          unzip -qo InstallerVictim.ipa -d /tmp/ipa_check
+          APP_DIR=$(find /tmp/ipa_check/Payload -maxdepth 1 -type d -mindepth 1 | head -1)
+          BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
+          TEAM_ID=$(codesign -dvv "$APP_DIR/$BINARY_NAME" 2>&1 | grep "TeamIdentifier" | head -1 | awk -F'=' '{print $NF}' | tr -d '[:space:]')
+          echo "受害者 App Team ID: $TEAM_ID"
+          export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+          ./make_cert.sh "$TEAM_ID"
+          echo "victim.p12 生成完成"
+
+      # ========== 打包 TrollHelper_iOS15.ipa（指南针壳注入 arm64 助手） ==========
+      - name: Build TrollHelper_iOS15.ipa
+        run: |
+          mkdir -p _build/tmp15
+          unzip -qo Victim/InstallerVictim.ipa -d _build/tmp15
+          cp _build/PersistenceHelper_Legacy_arm64 _build/TrollStorePersistenceHelperToInject
+          ./Pwnify/pwnify set-cpusubtype _build/TrollStorePersistenceHelperToInject 1
+          ldid -s -K./Victim/victim.p12 _build/TrollStorePersistenceHelperToInject
+          cd _build/tmp15
+          APP_PATH=$(find Payload -maxdepth 1 -type d -mindepth 1 | head -1)
+          APP_NAME=$(basename "$APP_PATH")
+          BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist")
+          cd ../..
+          echo "壳 App: $APP_NAME / 可执行文件: $BINARY_NAME"
+          ./Pwnify/pwnify pwn "_build/tmp15/Payload/$APP_NAME/$BINARY_NAME" _build/TrollStorePersistenceHelperToInject
+          # 注意：pwnify pwn 后不删除 _CodeSignature、不重签，保留 App Store 原始签名结构
+          cd _build/tmp15 && zip -vrD ../../_build/TrollHelper_iOS15.ipa * && cd ../..
+          rm _build/TrollStorePersistenceHelperToInject
+          rm -rf _build/tmp15
+
+      # ========== 打包 TrollHelper_arm64e.ipa（指南针壳注入 arm64e 助手） ==========
+      - name: Build TrollHelper_arm64e.ipa
+        run: |
+          mkdir -p _build/tmp64e
+          unzip -qo Victim/InstallerVictim.ipa -d _build/tmp64e
+          cd _build/tmp64e
+          APP_PATH=$(find Payload -maxdepth 1 -type d -mindepth 1 | head -1)
+          APP_NAME=$(basename "$APP_PATH")
+          BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist")
+          cd ../..
+          ./Pwnify/pwnify pwn64e "_build/tmp64e/Payload/$APP_NAME/$BINARY_NAME" _build/PersistenceHelper_Legacy_arm64e
+          cd _build/tmp64e && zip -vrD ../../_build/TrollHelper_arm64e.ipa * && cd ../..
+          rm -rf _build/tmp64e
+
+      - name: Verify artifacts
+        run: |
+          ls -lh _build/
+          echo "=== 验证 ipa 内注入的助手二进制 ==="
+          mkdir -p /tmp/verify_ipa
+          unzip -qo _build/TrollHelper_iOS15.ipa -d /tmp/verify_ipa
+          APP=$(find /tmp/verify_ipa/Payload -maxdepth 1 -type d -mindepth 1 | head -1)
+          BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
+          echo "壳: $(basename $APP)  主二进制: $BINARY_NAME"
+          file "$APP/$BINARY_NAME" | head -2
+          strings "$APP/$BINARY_NAME" | grep -m2 "kmlogon\|卡密" || echo "（主二进制为指南针原文件，卡密代码在注入段，属正常）"
+          file "$APP/TrollStorePersistenceHelper" 2>/dev/null || echo "（注入段内嵌，pwnify 方式）"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: |
+            _build/TrollStore.tar
+            _build/TrollHelper_iOS15.ipa
+            _build/TrollHelper_arm64e.ipa
+            _build/PersistenceHelper_Embedded
+          retention-days: 90
+
+      - name: Create Release tag
+        run: |
+          git tag -f compass
+          git push -f origin refs/tags/compass
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: compass
+          name: TrollStore 指南针壳版
+          body: |
+            基于 shitou6688/TrollStore 流水线 + 卡密验证定制版
+
+            **文件说明：**
+            - `TrollHelper_iOS15.ipa` — 指南针壳受害者 IPA（arm64，iOS 15.x 设备侧载安装）
+            - `TrollHelper_arm64e.ipa` — 指南针壳受害者 IPA（arm64e，A12-A11 设备侧载安装）
+            - `TrollStore.tar` — 巨魔商店主程序包（助手内"安装巨魔商店"即下载此文件）
+            - `PersistenceHelper_Embedded` — 内嵌 RootHelper 的持久化助手裸二进制
+          files: |
+            _build/TrollStore.tar
+            _build/TrollHelper_iOS15.ipa
+            _build/TrollHelper_arm64e.ipa
+            _build/PersistenceHelper_Embedded
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
