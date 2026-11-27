@@ -15,3 +15,4 @@
 *.icns binary
 *.a binary
 *.dylib binary
+ldid_procursus binary
