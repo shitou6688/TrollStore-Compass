@@ -7,6 +7,7 @@
 #import <IOKit/IOKitLib.h>
 #import <Security/Security.h>
 #import <sys/utsname.h>
+#import <sys/sysctl.h>
 
 // ============================================================
 // 卡密验证系统（kmlogon 协议，逻辑对齐 TrollInstallerXkaifa）
@@ -112,7 +113,7 @@ static NSString* getDeviceCode(void)
 		return serial;
 	}
 	// 3. identifierForVendor，存 Keychain 保证重装不变
-	NSString* uuid = UIDevice.currentDevice.identifierForVendor.uuidString ?: @"unknown";
+	NSString* uuid = UIDevice.currentDevice.identifierForVendor ? [UIDevice.currentDevice.identifierForVendor UUIDString] : @"unknown";
 	saveDeviceCodeToKeychain(uuid);
 	return uuid;
 }
